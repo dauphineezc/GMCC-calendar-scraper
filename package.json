@@ -4,11 +4,12 @@
   "type": "module",
   "scripts": {
     "dev": "vercel dev",
-    "build": "echo \"no build step for static + functions\"",
-    "start": "vercel dev"
+    "build": "echo \"no build step\"",
+    "start": "vercel dev",
+    "postinstall": "npx playwright install --with-deps chromium"
   },
   "dependencies": {
-    "playwright": "^1.46.0",
-    "dayjs": "^1.11.11"
+    "dayjs": "^1.11.11",
+    "playwright": "^1.46.0"
   }
 }
