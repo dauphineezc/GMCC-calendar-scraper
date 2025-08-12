@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Weekly Schedule</title>
+  <meta name="color-scheme" content="light only" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root { --row-h: 64px; } /* 1 hour = 64px */
+    html,body { height: 100%; }
+    body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Apple Color Emoji","Segoe UI Emoji"; }
+    .scrollbar::-webkit-scrollbar{ width:8px; height:8px; } .scrollbar::-webkit-scrollbar-track{ background:#f1f1f1;}
+    .scrollbar::-webkit-scrollbar-thumb{ background:#a8a8a8; border-radius:4px;} .scrollbar::-webkit-scrollbar-thumb:hover{ background:#888; }
+    .tab-btn.active{ border-bottom-color:#3b82f6; color:#111827; font-weight:600; }
+    .day-col { position: relative; }
+    .event-card { position:absolute; box-sizing:border-box; border-left-width:4px; border-radius:0.5rem; padding:0.5rem 0.75rem; z-index:10; }
+    .now-line { position:absolute; height:2px; background:#ef4444; z-index:30; }
+    .now-dot { position:absolute; width:8px; height:8px; background:#ef4444; border-radius:9999px; left:0; top:50%; transform:translate(-50%,-50%); }
+    .tz-hide { display:none !important; } /* hide “Times shown in …” */
+    @media print {
+      .no-print { display:none !important; }
+      .print-block { display:block !important; }
+      .event-card { box-shadow:none !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+    }
+    /* Responsive tweaks */
+    @media (max-width: 768px) {
+      .event-card { padding: 0.25rem 0.5rem; font-size: 0.75rem; max-width: 100%; overflow: hidden; }
+      .event-card p:first-child { font-size: 0.875rem; line-height: 1.2; }
+    }
+    @media (max-width: 640px) {
+      .event-card { padding: 0.125rem 0.25rem; font-size: 0.625rem; }
+      .event-card p:first-child { font-size: 0.75rem; line-height: 1.1; }
+    }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-800 antialiased">
+  <main class="mx-auto max-w-7xl p-4">
+
+    <!-- Controls -->
+    <div class="no-print grid grid-cols-3 items-center gap-3 mb-3">
+      <div class="flex items-center gap-2">
+        <button id="prevBtn" class="px-2 py-1 rounded border text-sm hover:bg-gray-100" aria-label="Previous week">◀</button>
+        <button id="todayBtn" class="px-2 py-1 rounded border text-sm hover:bg-gray-100">Today</button>
+        <button id="nextBtn" class="px-2 py-1 rounded border text-sm hover:bg-gray-100" aria-label="Next week">▶</button>
+      </div>
+      <div id="rangeLabel" class="font-semibold text-center"></div>
+      <div class="text-sm text-gray-500 tz-hide">Times shown in <span id="tzLabel"></span></div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="mb-4 border-b border-gray-200">
+      <nav id="tabs" class="-mb-px flex flex-wrap gap-6" aria-label="Calendars"></nav>
+    </div>
+
+    <!-- Desktop grid -->
+    <section class="hidden md:block bg-white rounded-lg shadow overflow-hidden">
+      <div id="gridScroller" class="scrollbar overflow-auto" style="height: 80vh;">
+        <div class="relative">
+          <div id="gridHeader" class="grid sticky top-0 bg-white z-20 shadow-sm"
+               style="grid-template-columns: 4rem repeat(7, minmax(120px, 1fr));"></div>
+          <div id="gridBody" class="grid relative"
+               style="grid-template-columns: 4rem repeat(7, minmax(120px, 1fr));"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Mobile list -->
+    <section id="listView" class="md:hidden bg-white rounded-lg shadow p-4 space-y-5 overflow-y-auto" style="height: 80vh;"></section>
+  </main>
+
+  <script>
+  /**
+   * This page expects a serverless endpoint at:
+   *   /api/classes?start=YYYY-MM-DD&end=YYYY-MM-DD
+   * returning:
+   * { calendars: string[], events: [{cal,title,start,end,url?,location?,color?}] }
+   */
+
+  /* ---------- Palette ---------- */
+  const PALETTE = {
+    blue:   ["bg-blue-100","text-blue-800","border-blue-500"],
+    green:  ["bg-green-100","text-green-800","border-green-500"],
+    purple: ["bg-purple-100","text-purple-800","border-purple-500"],
+    yellow: ["bg-yellow-100","text-yellow-800","border-yellow-500"],
+    indigo: ["bg-indigo-100","text-indigo-800","border-indigo-500"],
+    orange: ["bg-orange-100","text-orange-800","border-orange-500"],
+    red:    ["bg-red-100","text-red-800","border-red-500"],
+    teal:   ["bg-teal-100","text-teal-800","border-teal-500"],
+    gray:   ["bg-gray-200","text-gray-800","border-gray-500"],
+    pink:   ["bg-pink-100","text-pink-800","border-pink-500"],
+    cyan:   ["bg-cyan-100","text-cyan-800","border-cyan-500"]
+  };
+
+  /* ---------- State ---------- */
+  let CALS = {};                                // { key: { label, events:[{dayIndex,startMinutes,endMinutes,url?,color{bg,text,border},name,id}] } }
+  const CAL_KEYS = () => Object.keys(CALS);
+  let currentCal = null;
+
+  const params = new URLSearchParams(location.search);
+  const START_OF_WEEK = getMonday(new Date());
+  let weekStart = params.get("w") ? new Date(params.get("w")) : START_OF_WEEK;
+  if (isNaN(+weekStart)) weekStart = START_OF_WEEK;
+
+  const els = {
+    tabs: document.getElementById("tabs"),
+    gridHeader: document.getElementById("gridHeader"),
+    gridBody: document.getElementById("gridBody"),
+    list: document.getElementById("listView"),
+    rangeLabel: document.getElementById("rangeLabel"),
+    tzLabel: document.getElementById("tzLabel"),
+    prevBtn: document.getElementById("prevBtn"),
+    nextBtn: document.getElementById("nextBtn"),
+    todayBtn: document.getElementById("todayBtn"),
+    scroller: document.getElementById("gridScroller")
+  };
+  els.tzLabel.textContent = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  let dayOverlays = []; // per-day absolute layers
+
+  /* ---------- Controls ---------- */
+  els.prevBtn.onclick = () => changeWeek(-7);
+  els.nextBtn.onclick = () => changeWeek(+7);
+  els.todayBtn.onclick = () => { weekStart = getMonday(new Date()); syncUrl(); render(); };
+
+  function changeWeek(deltaDays){ weekStart = addDays(weekStart, deltaDays); syncUrl(); render(); }
+  function syncUrl(){
+    const p = new URLSearchParams();
+    if (currentCal) p.set("cal", currentCal);
+    p.set("w", ymd(weekStart));
+    history.replaceState(null, "", `?${p.toString()}`);
+  }
+
+  /* ---------- Dates ---------- */
+  function getMonday(d){ const x = new Date(d); const day = (x.getDay()+6)%7; x.setHours(0,0,0,0); return addDays(x, -day); }
+  function addDays(d, n){ const x = new Date(d); x.setDate(x.getDate()+n); return x; }
+  function ymd(d){ return d.toISOString().slice(0,10); }
+  function labelDate(d){ return d.toLocaleDateString(undefined,{month:"short",day:"numeric"}); }
+
+  /* ---------- Data loader ---------- */
+  async function loadWeekData() {
+    // show a very small loading hint in the range label
+    els.rangeLabel.textContent = "Loading…";
+
+    const startISO = ymd(weekStart);
+    const endISO   = ymd(addDays(weekStart, 6));
+
+    let data;
+    try {
+      const res = await fetch(`/api/classes?start=${startISO}&end=${endISO}`, { cache: "no-store" });
+      data = await res.json();
+    } catch (e) {
+      console.error(e);
+      data = { calendars: [], events: [] };
+    }
+
+    // group by calendar label
+    const key = (s) => s.toLowerCase().replace(/\s+/g,'');
+    const next = {};
+    for (const label of (data.calendars || [])) next[key(label)] = { label, events: [] };
+
+    // map events
+    for (const ev of (data.events || [])) {
+      const s = new Date(ev.start);
+      const e = new Date(ev.end);
+      const monday = getMonday(weekStart);
+      const dayIndex = Math.floor((s - monday) / 86400000);
+      if (dayIndex < 0 || dayIndex > 6) continue;
+
+      const startMinutes = s.getHours()*60 + s.getMinutes();
+      const endMinutes   = e.getHours()*60 + e.getMinutes();
+
+      const colorKey = ev.color && PALETTE[ev.color] ? ev.color : 'gray';
+      const [bg,text,border] = PALETTE[colorKey];
+      const k = key(ev.cal || 'Schedule');
+
+      (next[k] ??= { label: ev.cal || 'Schedule', events: [] }).events.push({
+        id: `${ev.title}-${ev.start}`,
+        name: ev.title,
+        dayIndex,
+        startMinutes,
+        endMinutes,
+        url: ev.url || null,
+        color: { bg, text, border }
+      });
+    }
+
+    CALS = next;
+
+    // pick/validate currentCal (try URL param, else first)
+    const urlCal = params.get("cal");
+    if (urlCal && CALS[urlCal]) currentCal = urlCal;
+    if (!currentCal) currentCal = CAL_KEYS()[0] || null;
+  }
+
+  /* ---------- Rendering ---------- */
+  function renderTabs(){
+    els.tabs.innerHTML = "";
+    const keys = CAL_KEYS();
+    if (!keys.length) return;
+
+    for (const key of keys){
+      const btn = document.createElement("button");
+      btn.className = "tab-btn py-4 px-1 border-b-2 border-transparent text-sm font-medium text-gray-500 hover:text-gray-700 hover:border-gray-300";
+      btn.textContent = CALS[key].label;
+      if (key === currentCal) btn.classList.add("active");
+      btn.onclick = () => {
+        currentCal = key;
+        document.querySelectorAll(".tab-btn").forEach(b=>b.classList.remove("active"));
+        btn.classList.add("active");
+        syncUrl();
+        renderBody();
+      };
+      els.tabs.appendChild(btn);
+    }
+  }
+
+  function render(){ 
+    renderHeader(); 
+    renderBody(); 
+  }
+
+  function renderHeader(){
+    els.gridHeader.innerHTML = "";
+    const timeCell = document.createElement("div");
+    timeCell.className = "p-2 border-r border-b border-gray-200 text-xs text-center font-semibold text-gray-500 flex items-center justify-center";
+    timeCell.textContent = Intl.DateTimeFormat().resolvedOptions().timeZone.split('/').pop() || "Local";
+    els.gridHeader.appendChild(timeCell);
+
+    for (let i=0;i<7;i++){
+      const d = addDays(weekStart,i);
+      const h = document.createElement("div");
+      h.className = "p-2 border-b border-gray-200 text-center";
+      const isToday = ymd(d) === ymd(new Date());
+      h.innerHTML = `<p class="text-xs font-medium ${isToday?"text-blue-600":"text-gray-500"}">${["MON","TUE","WED","THU","FRI","SAT","SUN"][i]}</p>
+                     <p class="text-xs ${isToday?"font-semibold text-blue-600":""}">${labelDate(d)}</p>`;
+      els.gridHeader.appendChild(h);
+    }
+    const end = addDays(weekStart,6);
+    els.rangeLabel.textContent = `${labelDate(weekStart)} – ${labelDate(end)}`;
+  }
+
+  function renderBody(){
+    renderGrid();
+    renderList();
+  }
+
+  // GRID (desktop) with per-day overlays positioned ABOVE the grid cells
+  function renderGrid(){
+    const startHour = 5, endHour = 22;
+    const rowH = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--row-h"));
+
+    els.gridBody.innerHTML = "";
+    dayOverlays = [];
+
+    // time rail + empty cells
+    for (let hour=startHour; hour<=endHour; hour++){
+      const t = document.createElement("div");
+      t.className = "p-2 border-r border-gray-200 text-right text-xs text-gray-400 h-16 flex items-start justify-end -mt-2.5";
+      if (hour < endHour){
+        const h12 = (hour % 12)||12;
+        t.textContent = `${h12} ${hour<12?"AM":"PM"}`;
+      }
+      els.gridBody.appendChild(t);
+      for (let day=0; day<7; day++){
+        const cell = document.createElement("div");
+        cell.className = "border-r border-b border-gray-200 h-16 day-col";
+        cell.dataset.day = day;
+        els.gridBody.appendChild(cell);
+      }
+    }
+
+    // Build 7 overlays
+    const firstRowCells = [...els.gridBody.querySelectorAll('.day-col')].slice(0,7);
+    const totalHeight = (endHour - startHour) * rowH;
+
+    for (let day=0; day<7; day++){
+      const refCell = firstRowCells[day];
+      const left  = refCell.offsetLeft + refCell.clientLeft;
+      const width = refCell.clientWidth;
+
+      const overlay = document.createElement('div');
+      overlay.style.position = 'absolute';
+      overlay.style.zIndex = '5';
+      overlay.style.top = '0';
+      overlay.style.left = `${left}px`;
+      overlay.style.width = `${width}px`;
+      overlay.style.height = `${totalHeight}px`;
+      overlay.style.pointerEvents = 'none';
+      els.gridBody.appendChild(overlay);
+      dayOverlays[day] = overlay;
+    }
+
+    // Render events
+    const keys = CAL_KEYS();
+    if (!keys.length || !currentCal || !CALS[currentCal]) return;
+
+    const events = CALS[currentCal].events;
+    const groupsByDay = Array.from({length:7},()=>[]);
+    events.forEach(e => groupsByDay[e.dayIndex].push(e));
+
+    for (let day=0; day<7; day++){
+      const dayEvents = groupsByDay[day].slice().sort((a,b)=> 
+        a.startMinutes===b.startMinutes ? b.endMinutes-a.endMinutes : a.startMinutes-b.startMinutes
+      );
+      placeEventsInDay(day, dayEvents);
+    }
+
+    positionNowLine(startHour, endHour);
+  }
+
+  function minutesToPixels(startHour, minutes) {
+    const rowH = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--row-h"));
+    return (minutes - startHour*60) * (rowH / 60);
+  }
+
+  function placeEventsInDay(dayIndex, dayEvents) {
+    if (dayEvents.length === 0) return;
+
+    const startHour = 5;
+    const rowH = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--row-h"));
+    const bucket = m => Math.floor(m / 5); // 5-min granularity
+    const layout = {};
+
+    dayEvents.forEach(ev => {
+      for (let m = ev.startMinutes; m < ev.endMinutes; m += 5) {
+        const key = `${dayIndex}_${bucket(m)}`;
+        (layout[key] ??= []).push(ev);
+      }
+    });
+
+    dayEvents.forEach(ev => {
+      const top = minutesToPixels(startHour, ev.startMinutes);
+      const height = Math.max(8, (ev.endMinutes - ev.startMinutes) * (rowH / 60));
+
+      const card = document.createElement(ev.url ? "a" : "div");
+      if (ev.url) card.href = ev.url;
+      card.className = `event-card shadow-sm ${ev.color.bg} ${ev.color.text} ${ev.color.border}`;
+      card.style.top = `${top}px`;
+      card.style.height = `${height}px`;
+      card.style.pointerEvents = 'auto';
+
+      const oKey = `${dayIndex}_${bucket(ev.startMinutes)}`;
+      const overlappers = layout[oKey] || [];
+      const total = overlappers.length;
+      const index = overlappers.findIndex(x => x === ev);
+
+      if (total > 1) {
+        const gap = 4;
+        const eventWidthPct = 100 / total;
+        card.style.width = `calc(${eventWidthPct}% - ${gap}px)`;
+        card.style.left = `calc(${index * eventWidthPct}% + ${gap - (index * gap)}px)`;
+      } else {
+        const margin = 4;
+        card.style.width = `calc(100% - ${margin * 2}px)`;
+        card.style.left = `${margin}px`;
+      }
+
+      card.innerHTML = `
+        <p class="font-semibold text-sm leading-tight">${ev.name}</p>
+        <p class="text-xs opacity-90">${formatRange(ev.startMinutes, ev.endMinutes)}</p>
+      `;
+      const overlay = dayOverlays[dayIndex];
+      if (overlay) overlay.appendChild(card);
+    });
+  }
+
+  function positionNowLine(startHour, endHour){
+    document.querySelectorAll(".now-line").forEach(n => n.remove());
+
+    const now = new Date();
+    const dow = (now.getDay() + 6) % 7; // Mon=0
+    const h = now.getHours(), m = now.getMinutes();
+    if (h < startHour || h >= endHour) return;
+
+    const overlay = dayOverlays[dow];
+    if (!overlay) return;
+
+    const rowH = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--row-h"));
+    const minutesPast = (h - startHour) * 60 + m;
+    const top = minutesPast * (rowH / 60);
+
+    const line = document.createElement("div");
+    line.className = "now-line";
+    line.style.left = "0px";
+    line.style.right = "0px";
+    line.style.top = `${top}px`;
+
+    const dot = document.createElement("div");
+    dot.className = "now-dot";
+
+    line.appendChild(dot);
+    overlay.appendChild(line);
+  }
+
+  setInterval(()=>{ renderHeader(); renderGrid(); }, 60000); // tick minute
+
+  // Reflow on resize
+  let resizeTimeout;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimeout);
+    resizeTimeout = setTimeout(() => renderGrid(), 100);
+  });
+
+  // LIST (mobile)
+  function renderList(){
+    els.list.innerHTML = "";
+    const keys = CAL_KEYS();
+    if (!keys.length || !currentCal || !CALS[currentCal]) {
+      const msg = document.createElement("div");
+      msg.className = "text-sm text-gray-500";
+      msg.textContent = "No events this week.";
+      els.list.appendChild(msg);
+      return;
+    }
+
+    const days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+    const byDay = Array.from({length:7},()=>[]);
+    for (const e of CALS[currentCal].events) byDay[e.dayIndex].push(e);
+
+    for (let i=0;i<7;i++){
+      const d = addDays(weekStart,i);
+      const header = document.createElement("div");
+      const isToday = ymd(d) === ymd(new Date());
+      header.className = "pt-2 pb-2 border-b";
+      header.innerHTML = `<h2 class="text-lg font-bold ${isToday?"text-blue-700":""}">${days[i]}</h2>
+                          <div class="text-xs text-gray-500">${labelDate(d)}</div>`;
+      els.list.appendChild(header);
+
+      if (!byDay[i].length){
+        const none = document.createElement("div");
+        none.className = "text-sm text-gray-400 pt-2"; 
+        none.textContent = "No events";
+        els.list.appendChild(none);
+      } else {
+        byDay[i].sort((a,b)=>a.startMinutes-b.startMinutes).forEach(e=>{
+          const item = document.createElement(e.url ? "a" : "div");
+          if (e.url) item.href = e.url;
+          item.className = `mt-2 p-3 rounded-lg block ${e.color.bg} ${e.color.text}`;
+          item.innerHTML = `<p class="font-semibold">${e.name}</p>
+                            <p class="text-sm opacity-90">${formatRange(e.startMinutes, e.endMinutes)}</p>`;
+          els.list.appendChild(item);
+        });
+      }
+    }
+  }
+
+  function formatRange(startM, endM) {
+    const fmt = m => {
+      const h = Math.floor(m / 60), mins = m % 60;
+      const h12 = (h % 12) || 12, ap = h < 12 ? "AM" : "PM";
+      return `${h12}:${String(mins).padStart(2,'0')} ${ap}`;
+    };
+    return `${fmt(startM)} – ${fmt(endM)}`;
+  }
+
+  /* ---------- Boot ---------- */
+  (async function init(){
+    await loadWeekData();
+    renderTabs();
+    render();
+    syncUrl();
+  })();
+  </script>
+</body>
+</html>

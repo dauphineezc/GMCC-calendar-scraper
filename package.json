@@ -1,0 +1,14 @@
+{
+  "name": "gmcc-calendar-scraper",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "echo \"no build step for static + functions\"",
+    "start": "vercel dev"
+  },
+  "dependencies": {
+    "playwright": "^1.46.0",
+    "dayjs": "^1.11.11"
+  }
+}
